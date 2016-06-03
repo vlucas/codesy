@@ -217,9 +217,10 @@ class Claim(models.Model):
         payout = Payout(
             user=self.user,
             claim=self,
-            amount=bid.ask,
+            amount=bid.ask
         )
         payout.save()
+
         payout_attempt = payout.request()
         if payout.api_success is True:
             self.status = 'Paid'
@@ -528,11 +529,17 @@ class Payout(Payment):
     def fees(self):
         return PayoutFee.objects.filter(payout=self)
 
+    def credits(self):
+        return PayoutCredit.objects.filter(payout=self)
+
     def request(self):
         receiver = (
             PAYPAL_PAYOUT_RECIPIENT if PAYPAL_PAYOUT_RECIPIENT
             else self.claim.user.email
         )
+
+        total_payout_amount = self.amount
+
         paypal_fee = PayoutFee(
             payout=self,
             fee_type='PayPal',
@@ -540,15 +547,30 @@ class Payout(Payment):
         )
         paypal_fee.save()
 
+        try:
+            user_offers = Offer.objects.filter(user=self.claim.user)
+            if user_offers:
+                total_refund = user_offers.aggregate(Sum('amount'))['amount__sum']
+                refund_user_offer = PayoutCredit(
+                    payout=self,
+                    fee_type='refund',
+                    amount=total_refund,
+                )
+                refund_user_offer.save()
+                total_payout_amount += total_refund
+
+        except Offer.DoesNotExist:
+            refund_user_offer = None
+
         codesy_fee = PayoutFee(
             payout=self,
             fee_type='codesy',
-            amount=self.amount * Decimal('0.025'),
+            amount=total_payout_amount * Decimal('0.025'),
         )
         codesy_fee.save()
 
         total_fees = paypal_fee.amount + codesy_fee.amount
-        self.charge_amount = self.amount - total_fees
+        self.charge_amount = total_payout_amount - total_fees
         self.save()
         # attempt paypal payout
         # user generated id sent to paypal is limited to 30 chars
@@ -593,6 +615,7 @@ class Fee(models.Model):
         ('PayPal', 'PayPal'),
         ('Stripe', 'Stripe'),
         ('codesy', 'codesy'),
+        ('refund', 'refund')
     )
     fee_type = models.CharField(
         max_length=255,
@@ -613,6 +636,9 @@ class OfferFee(Fee):
 class PayoutFee(Fee):
     payout = models.ForeignKey(Payout, related_name="payout_fees", null=True)
 
+
+class PayoutCredit(Fee):
+    payout = models.ForeignKey(Payout, related_name="refund_credits", null=True)
 
 @receiver(pre_save, sender=OfferFee)
 @receiver(pre_save, sender=PayoutFee)
